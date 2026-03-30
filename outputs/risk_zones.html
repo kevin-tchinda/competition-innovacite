@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ottawa - Itinéraire sécurisé avec zones à risque</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; }
+        #map { height: 100vh; width: 100%; }
+        .controls {
+            position: absolute; top: 20px; left: 20px; right: 20px; background: white;
+            padding: 15px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000; max-width: 380px;
+        }
+        .controls input {
+            width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd;
+            border-radius: 6px; font-size: 14px;
+        }
+        .controls button {
+            width: 100%; padding: 10px; background: #d32f2f; color: white;
+            border: none; border-radius: 6px; font-size: 14px; font-weight: bold;
+            cursor: pointer; margin-top: 10px;
+        }
+        .controls button:hover { background: #b71c1c; }
+        .legend {
+            position: absolute; bottom: 20px; right: 20px; background: white;
+            padding: 10px 15px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            z-index: 1000; font-size: 11px;
+        }
+        .legend span { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; }
+        .legend-item { margin-bottom: 4px; display: flex; align-items: center; }
+        .legend-line { width: 25px; height: 3px; margin-right: 8px; }
+        .result-panel {
+            position: absolute; bottom: 20px; left: 20px; right: 20px; background: white;
+            border-radius: 12px; padding: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 1000; max-width: 380px; border-left: 4px solid #d32f2f;
+            display: none; max-height: 300px; overflow-y: auto;
+        }
+        .result-panel h4 { margin-bottom: 8px; color: #333; font-size: 14px; }
+        .result-panel .safe { color: #388e3c; }
+        .result-panel .warning { color: #d32f2f; }
+        .result-panel .moderate { color: #f57c00; }
+        .route-info { background: #f5f5f5; padding: 10px; border-radius: 8px; margin-top: 8px; font-size: 12px; }
+        .zone-list { margin-top: 8px; font-size: 12px; }
+        .zone-item { padding: 5px 0; border-bottom: 1px solid #eee; }
+        .loading-indicator { font-size: 12px; color: #666; margin-top: 5px; }
+        .suggestions {
+            background: white; border: 1px solid #ddd; border-radius: 6px;
+            max-height: 150px; overflow-y: auto; position: absolute;
+            width: calc(100% - 30px); z-index: 1001;
+        }
+        .suggestion-item { padding: 8px; cursor: pointer; border-bottom: 1px solid #eee; font-size: 12px; }
+        .suggestion-item:hover { background: #f0f0f0; }
+        @media (max-width: 768px) {
+            .controls { max-width: calc(100% - 40px); }
+            .result-panel { max-width: calc(100% - 40px); }
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="controls">
+        <input type="text" id="start" placeholder="Point de depart (adresse ou coordonnees)" value="Parliament Hill, Ottawa">
+        <input type="text" id="end" placeholder="Point d'arrivee (adresse ou coordonnees)" value="Byward Market, Ottawa">
+        <button id="calculate">Calculer l'itineraire securise</button>
+        <div id="start-loading" class="loading-indicator"></div>
+        <div id="end-loading" class="loading-indicator"></div>
+    </div>
+    
+    <div class="legend">
+        <div class="legend-item"><span style="background: #ffeb3b;"></span> Point noir majeur (36 089 accidents)</div>
+        <div class="legend-item"><span style="background: #d32f2f;"></span> Risque eleve (500+ accidents)</div>
+        <div class="legend-item"><span style="background: #f57c00;"></span> Risque modere (100-499 accidents)</div>
+        <div class="legend-item"><div class="legend-line" style="background: #2196f3;"></div> Itineraire calcule</div>
+        <div class="legend-item"><span style="background: #4caf50;"></span> Depart / Arrivee</div>
+    </div>
+    
+    <div id="result-panel" class="result-panel">
+        <h4>Analyse de securite de l'itineraire</h4>
+        <div id="risk-summary"></div>
+        <div id="route-info" class="route-info"></div>
+        <div id="zone-list" class="zone-list"></div>
+    </div>
+
+    <script>
+        let map, currentRoute, currentMarkers = [];
+        let startCoords = null;
+        let endCoords = null;
+        
+        const riskZones = [
+            {"lat": 45.4087885198616, "lng": -75.6972350039378, "severity": 36089, "injury_rate": 14.9, "name": "Centre-ville / Autoroute 417", "riskLevel": "critique", "radius": 450},
+            {"lat": 45.37705348002715, "lng": -75.66461053640819, "severity": 1376, "injury_rate": 18.9, "name": "Heron Rd / Bank St", "riskLevel": "high", "radius": 280},
+            {"lat": 45.4021395692269, "lng": -75.6257794109284, "severity": 1179, "injury_rate": 16.7, "name": "St. Laurent Blvd", "riskLevel": "high", "radius": 260},
+            {"lat": 45.3536310386628, "lng": -75.6483043080727, "severity": 960, "injury_rate": 19.4, "name": "Bank St / Hunt Club Rd", "riskLevel": "high", "radius": 240},
+            {"lat": 45.3341738351204, "lng": -75.69835367166635, "severity": 886, "injury_rate": 13.4, "name": "Hunt Club Rd / Riverside Dr", "riskLevel": "high", "radius": 230},
+            {"lat": 45.3683910162106, "lng": -75.7114495906265, "severity": 641, "injury_rate": 18.4, "name": "Fisher Ave / Deer Park", "riskLevel": "high", "radius": 210},
+            {"lat": 45.2702953744061, "lng": -75.74555456813145, "severity": 698, "injury_rate": 16.0, "name": "Greenbank Rd / Strandherd", "riskLevel": "high", "radius": 220},
+            {"lat": 45.377537168807606, "lng": -75.648984076259, "severity": 546, "injury_rate": 19.8, "name": "Heron Rd / Walkley Rd", "riskLevel": "high", "radius": 200},
+            {"lat": 45.4509188319438, "lng": -75.58436172940225, "severity": 544, "injury_rate": 17.8, "name": "Montreal Rd / Sheffield Rd", "riskLevel": "high", "radius": 200},
+            {"lat": 45.293536806323, "lng": -75.8940942959101, "severity": 517, "injury_rate": 17.4, "name": "Hazeldean Rd / Terry Fox", "riskLevel": "high", "radius": 195},
+            {"lat": 45.3286981288044, "lng": -75.7489724101762, "severity": 561, "injury_rate": 15.9, "name": "Majestic Dr / Woodroffe Ave", "riskLevel": "high", "radius": 205},
+            {"lat": 45.460852658957, "lng": -75.4878096317059, "severity": 489, "injury_rate": 18.0, "name": "Vanguard Dr", "riskLevel": "moderate", "radius": 180},
+            {"lat": 45.3770631213802, "lng": -75.68819753554186, "severity": 530, "injury_rate": 14.3, "name": "Riverside Dr Ramp", "riskLevel": "high", "radius": 195},
+            {"lat": 45.321477830652555, "lng": -75.8871873015989, "severity": 480, "injury_rate": 15.6, "name": "Bishops Mills Way", "riskLevel": "moderate", "radius": 175},
+            {"lat": 45.3771867747052, "lng": -75.7332259594188, "severity": 365, "injury_rate": 20.3, "name": "Merivale Rd", "riskLevel": "moderate", "radius": 160},
+            {"lat": 45.3523361095714, "lng": -75.8055496311804, "severity": 442, "injury_rate": 15.8, "name": "Carling Ave / Wylie Ave", "riskLevel": "moderate", "radius": 170},
+            {"lat": 45.46414770790865, "lng": -75.5401319231827, "severity": 736, "injury_rate": 9.5, "name": "OR174 Jeanne Darc", "riskLevel": "high", "radius": 225},
+            {"lat": 45.322595683784755, "lng": -75.77752512345509, "severity": 378, "injury_rate": 18.3, "name": "Greenbank Rd / West Hunt", "riskLevel": "moderate", "radius": 165},
+            {"lat": 45.4557012401101, "lng": -75.5047780178566, "severity": 351, "injury_rate": 17.4, "name": "Innes Rd / Jeanne D'Arc", "riskLevel": "moderate", "radius": 160},
+            {"lat": 45.2881301214164, "lng": -75.7570294917582, "severity": 286, "injury_rate": 18.9, "name": "Fallowfield Rd / Greenbank", "riskLevel": "moderate", "radius": 150}
+        ];
+        
+        map = L.map('map').setView([45.4215, -75.6972], 12);
+        
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: 'OpenStreetMap contributors',
+            subdomains: 'abcd',
+            maxZoom: 19
+        }).addTo(map);
+        
+        riskZones.forEach(zone => {
+            let color;
+            if (zone.riskLevel === "critique") color = "#ffeb3b";
+            else if (zone.riskLevel === "high") color = "#d32f2f";
+            else color = "#f57c00";
+            
+            L.circle([zone.lat, zone.lng], {
+                color: color, fillColor: color, fillOpacity: 0.25,
+                radius: zone.radius, weight: 2, opacity: 0.7
+            }).addTo(map);
+            
+            L.circleMarker([zone.lat, zone.lng], {
+                color: color, fillColor: color, fillOpacity: 0.85,
+                radius: zone.riskLevel === "critique" ? 14 : 10, weight: 2
+            }).addTo(map).bindPopup(`
+                <strong>${zone.name}</strong><br>
+                ${zone.severity.toLocaleString()} accidents<br>
+                Taux de blessures: ${zone.injury_rate}%<br>
+                Niveau: ${zone.riskLevel.toUpperCase()}
+            `);
+        });
+        
+        async function geocodeAddress(address) {
+            const coordMatch = address.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+            if (coordMatch) {
+                return { lat: parseFloat(coordMatch[1]), lng: parseFloat(coordMatch[2]), display_name: address };
+            }
+            
+            const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address + ", Ottawa, Ontario")}&limit=1`;
+            try {
+                const response = await fetch(url, { headers: { 'User-Agent': 'Ottawa-Risk-Map/1.0' } });
+                const data = await response.json();
+                if (data && data.length > 0) {
+                    return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lng), display_name: data[0].display_name };
+                }
+                return null;
+            } catch (error) {
+                return null;
+            }
+        }
+        
+        function distanceToPoint(point, zone) {
+            const R = 6371;
+            const lat1 = point.lat * Math.PI / 180;
+            const lat2 = zone.lat * Math.PI / 180;
+            const deltaLat = (zone.lat - point.lat) * Math.PI / 180;
+            const deltaLng = (zone.lng - point.lng) * Math.PI / 180;
+            
+            const a = Math.sin(deltaLat/2) * Math.sin(deltaLat/2) +
+                      Math.cos(lat1) * Math.cos(lat2) *
+                      Math.sin(deltaLng/2) * Math.sin(deltaLng/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+        
+        function isPointInRiskZone(point, zone) {
+            return distanceToPoint(point, zone) < (zone.radius / 1000);
+        }
+        
+        function segmentIntersectsZone(start, end, zone) {
+            for (let i = 0; i <= 20; i++) {
+                const t = i / 20;
+                const point = { lat: start.lat + (end.lat - start.lat) * t, lng: start.lng + (end.lng - start.lng) * t };
+                if (isPointInRiskZone(point, zone)) return true;
+            }
+            return false;
+        }
+        
+        function analyzeRoute(coordinates) {
+            const affectedZones = [];
+            riskZones.forEach(zone => {
+                for (let i = 0; i < coordinates.length - 1; i++) {
+                    if (segmentIntersectsZone(coordinates[i], coordinates[i+1], zone)) {
+                        affectedZones.push(zone);
+                        break;
+                    }
+                }
+            });
+            return affectedZones;
+        }
+        
+        function showResult(route, affectedZones) {
+            const panel = document.getElementById('result-panel');
+            const summaryDiv = document.getElementById('risk-summary');
+            const routeInfoDiv = document.getElementById('route-info');
+            const zoneListDiv = document.getElementById('zone-list');
+            
+            routeInfoDiv.innerHTML = `Distance: ${route.distance.toFixed(1)} km | Duree: ${route.duration.toFixed(0)} min`;
+            
+            if (affectedZones.length === 0) {
+                summaryDiv.innerHTML = '<span class="safe">Aucune zone a risque detectee sur cet itineraire.</span>';
+                zoneListDiv.innerHTML = '<div class="zone-item">Cet itineraire est considere comme securitaire.</div>';
+                panel.style.borderLeftColor = '#388e3c';
+            } else {
+                const highRisk = affectedZones.filter(z => z.riskLevel === 'critique' || z.riskLevel === 'high');
+                const moderateRisk = affectedZones.filter(z => z.riskLevel === 'moderate');
+                
+                let riskText = '';
+                if (highRisk.length > 0) {
+                    riskText = `<span class="warning">Attention: ${highRisk.length} zone(s) a risque eleve traversees.</span><br>`;
+                }
+                if (moderateRisk.length > 0) {
+                    riskText += `<span class="moderate">${moderateRisk.length} zone(s) a risque modere traversees.</span>`;
+                }
+                summaryDiv.innerHTML = riskText;
+                
+                let zoneHtml = '<div class="zone-item"><strong>Zones a risque sur le trajet:</strong></div>';
+                affectedZones.forEach(zone => {
+                    zoneHtml += `<div class="zone-item">
+                        <span style="color: ${zone.riskLevel === 'critique' ? '#ff9800' : (zone.riskLevel === 'high' ? '#d32f2f' : '#f57c00')}">●</span>
+                        ${zone.name} - ${zone.severity.toLocaleString()} accidents (${zone.injury_rate}% de blessures)
+                    </div>`;
+                });
+                zoneListDiv.innerHTML = zoneHtml;
+                panel.style.borderLeftColor = highRisk.length > 0 ? '#d32f2f' : '#f57c00';
+            }
+            
+            panel.style.display = 'block';
+        }
+        
+        async function calculateRouteApi(start, end) {
+            const url = `https://router.project-osrm.org/route/v1/driving/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`;
+            const response = await fetch(url);
+            const data = await response.json();
+            if (data.code !== 'Ok') return null;
+            const route = data.routes[0];
+            const coordinates = route.geometry.coordinates.map(coord => ({ lat: coord[1], lng: coord[0] }));
+            return { coordinates, distance: route.distance / 1000, duration: route.duration / 60 };
+        }
+        
+        function displayRoute(coordinates) {
+            if (currentRoute) map.removeLayer(currentRoute);
+            if (currentMarkers.length) currentMarkers.forEach(m => map.removeLayer(m));
+            
+            currentRoute = L.polyline(coordinates.map(c => [c.lat, c.lng]), {
+                color: '#2196f3', weight: 5, opacity: 0.9
+            }).addTo(map);
+            
+            const startIcon = L.divIcon({
+                html: '<div style="background: #4caf50; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>',
+                iconSize: [12, 12]
+            });
+            const endIcon = L.divIcon({
+                html: '<div style="background: #d32f2f; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>',
+                iconSize: [12, 12]
+            });
+            
+            const startMarker = L.marker([coordinates[0].lat, coordinates[0].lng], { icon: startIcon }).addTo(map).bindPopup('Depart');
+            const endMarker = L.marker([coordinates[coordinates.length-1].lat, coordinates[coordinates.length-1].lng], { icon: endIcon }).addTo(map).bindPopup('Arrivee');
+            
+            currentMarkers = [startMarker, endMarker];
+            map.fitBounds(currentRoute.getBounds(), { padding: [50, 50] });
+            return coordinates;
+        }
+        
+        document.getElementById('calculate').addEventListener('click', async () => {
+            const startInput = document.getElementById('start').value;
+            const endInput = document.getElementById('end').value;
+            
+            document.getElementById('start-loading').textContent = 'Geocodage en cours...';
+            document.getElementById('end-loading').textContent = 'Geocodage en cours...';
+            
+            const startResult = await geocodeAddress(startInput);
+            const endResult = await geocodeAddress(endInput);
+            
+            document.getElementById('start-loading').textContent = '';
+            document.getElementById('end-loading').textContent = '';
+            
+            if (!startResult) { alert('Point de depart non reconnu'); return; }
+            if (!endResult) { alert("Point d'arrivee non reconnu"); return; }
+            
+            startCoords = startResult;
+            endCoords = endResult;
+            
+            const route = await calculateRouteApi(startCoords, endCoords);
+            if (route) {
+                const coordinates = displayRoute(route.coordinates);
+                const affectedZones = analyzeRoute(coordinates);
+                showResult(route, affectedZones);
+            } else {
+                alert('Erreur: impossible de calculer l\'itineraire');
+            }
+        });
+        
+        let suggestTimeout;
+        async function suggestAddresses(input, fieldId) {
+            clearTimeout(suggestTimeout);
+            if (input.length < 3) return;
+            
+            suggestTimeout = setTimeout(async () => {
+                const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(input + ", Ottawa")}&limit=5`;
+                try {
+                    const response = await fetch(url, { headers: { 'User-Agent': 'Ottawa-Risk-Map/1.0' } });
+                    const data = await response.json();
+                    
+                    const existing = document.querySelector('.suggestions');
+                    if (existing) existing.remove();
+                    
+                    if (data && data.length > 0) {
+                        const suggestionDiv = document.createElement('div');
+                        suggestionDiv.className = 'suggestions';
+                        data.forEach(item => {
+                            const sugg = document.createElement('div');
+                            sugg.className = 'suggestion-item';
+                            sugg.textContent = item.display_name.substring(0, 70);
+                            sugg.onclick = () => {
+                                document.getElementById(fieldId).value = item.display_name;
+                                suggestionDiv.remove();
+                            };
+                            suggestionDiv.appendChild(sugg);
+                        });
+                        document.getElementById(fieldId).parentNode.insertBefore(suggestionDiv, document.getElementById(fieldId).nextSibling);
+                    }
+                } catch (error) {}
+            }, 400);
+        }
+        
+        document.getElementById('start').addEventListener('input', (e) => suggestAddresses(e.target.value, 'start'));
+        document.getElementById('end').addEventListener('input', (e) => suggestAddresses(e.target.value, 'end'));
+        document.addEventListener('click', (e) => { if (!e.target.closest('.controls')) document.querySelector('.suggestions')?.remove(); });
+        
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(pos => {
+                L.marker([pos.coords.latitude, pos.coords.longitude], {
+                    icon: L.divIcon({ html: '<div style="background: #2196f3; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>', iconSize: [10, 10] })
+                }).addTo(map).bindPopup('Votre position');
+            });
+        }
+        
+        (async () => {
+            const startResult = await geocodeAddress("Parliament Hill, Ottawa");
+            const endResult = await geocodeAddress("Byward Market, Ottawa");
+            if (startResult) startCoords = startResult;
+            if (endResult) endCoords = endResult;
+        })();
+    </script>
+</body>
+</html>
